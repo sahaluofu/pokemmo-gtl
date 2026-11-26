@@ -1,0 +1,30 @@
+# UTC research windows, not confirmed official event schedules.
+events:
+  - name: 万圣节 2025
+    event_type: halloween
+    announced_at: 1754092800
+    start_ts: 1761868800 # 2025-10-31
+    end_ts: 1762732800 # 2025-11-10, exclusive
+    impact_scope: all
+    notes: 固定日历研究窗口；非官方活动公告。
+  - name: 圣诞节 2025
+    event_type: christmas
+    announced_at: 1758844800
+    start_ts: 1766620800 # 2025-12-25
+    end_ts: 1767225600 # 2026-01-01, exclusive
+    impact_scope: all
+    notes: 固定日历研究窗口；非官方活动公告。
+  - name: 元旦 2026
+    event_type: new_year
+    announced_at: 1759449600
+    start_ts: 1767225600 # 2026-01-01
+    end_ts: 1767484800 # 2026-01-04, exclusive
+    impact_scope: all
+    notes: 固定日历研究窗口；非官方活动公告。
+  - name: 春节 2026
+    event_type: lunar_new_year
+    announced_at: 1763510400
+    start_ts: 1771286400 # 2026-02-17
+    end_ts: 1772496000 # 2026-03-03, exclusive
+    impact_scope: all
+    notes: 固定日历研究窗口；非官方活动公告。

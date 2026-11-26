@@ -1,0 +1,5 @@
+rate: "0.05"
+item_min_fee: 100
+pokemon_min_fee: 1000
+max_fee_per_slot: 25000
+default_relist_rate: "0.15"

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>PokeMMO GTL 市场工作台</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/vendor/echarts.min.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="global-bar">
+    <a class="brand" href="#overview" aria-label="PokeMMO GTL 工作台首页">
+      <span class="brand-mark">G</span>
+      <span>PokeMMO <strong>GTL</strong></span>
+    </a>
+    <div class="market-pulse" aria-live="polite">
+      <span id="envBadge" class="env-badge">连接中</span>
+      <span class="pulse-item"><span class="pulse-label">最近快照</span><strong id="snapshotTime">--</strong></span>
+      <span class="pulse-item"><span class="pulse-label">RP 通胀水位</span><strong id="rpLevel">--</strong><small id="rpValue">--</small></span>
+      <span class="pulse-item event-pulse"><span class="pulse-label">下一节日</span><strong id="eventCountdown">--</strong></span>
+    </div>
+    <div class="global-actions">
+      <label class="global-search">
+        <span aria-hidden="true">⌕</span>
+        <input id="globalSearch" type="search" placeholder="搜索物品名称或 ID" autocomplete="off" aria-label="全局搜索物品">
+        <kbd>↵</kbd>
+      </label>
+      <button id="themeToggle" class="icon-button" type="button" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <nav class="tab-bar" role="tablist" aria-label="工作台页面">
+      <button id="tab-overview" class="tab-button active" role="tab" aria-selected="true" aria-controls="view-overview" type="button" data-tab="overview">市场总览</button>
+      <button id="tab-analysis" class="tab-button" role="tab" aria-selected="false" aria-controls="view-analysis" tabindex="-1" type="button" data-tab="analysis">单品分析</button>
+      <button id="tab-backtest" class="tab-button" role="tab" aria-selected="false" aria-controls="view-backtest" tabindex="-1" type="button" data-tab="backtest">回测实验室</button>
+      <button id="tab-data" class="tab-button" role="tab" aria-selected="false" aria-controls="view-data" tabindex="-1" type="button" data-tab="data">数据中心</button>
+    </nav>
+    <div class="connection-strip"><span id="apiStatus" class="api-status" role="status">等待连接</span><button id="refreshAll" class="text-button" type="button">刷新数据</button></div>
+    <div id="globalNotice" class="global-notice" role="status" hidden></div>
+
+    <section id="view-overview" class="tab-panel active" role="tabpanel" aria-labelledby="tab-overview">
+      <div class="page-heading">
+        <div><p class="eyebrow">MARKET MONITOR</p><h1 id="overview-title">市场总览与异动信号</h1></div>
+        <label class="inline-control">预测周期
+          <select id="overviewHorizon"><option value="24">24 小时</option><option value="72" selected>72 小时</option><option value="168">7 天</option></select>
+        </label>
+      </div>
+      <div class="overview-grid">
+        <section class="data-section">
+          <div class="section-heading"><div><h2>高置信看涨</h2><p>概率与扣税净收益共同筛选</p></div><span class="section-mark positive">↑</span></div>
+          <div class="table-wrap"><table><thead><tr><th>物品</th><th>现价</th><th>看涨概率</th><th>净 ROI</th><th>信号</th></tr></thead><tbody id="bullishRows"></tbody></table></div>
+        </section>
+        <section class="data-section">
+          <div class="section-heading"><div><h2>卖压骤降</h2><p>近盘挂量收缩的标的</p></div><span class="section-mark warning">↓</span></div>
+          <div class="table-wrap"><table><thead><tr><th>物品</th><th>现价</th><th>近盘深度</th><th>24h 深度变化</th><th>信号</th></tr></thead><tbody id="thinningRows"></tbody></table></div>
+        </section>
+        <section class="data-section">
+          <div class="section-heading"><div><h2>24h 涨跌榜</h2><p>按最近可用价格变化排序</p></div><span class="section-mark neutral">↕</span></div>
+          <div class="table-wrap"><table><thead><tr><th>物品</th><th>现价</th><th>24h 涨跌</th><th>信号</th><th></th></tr></thead><tbody id="moverRows"></tbody></table></div>
+        </section>
+        <section class="data-section">
+          <div class="section-heading"><div><h2>收藏池</h2><p>持续跟踪的标的</p></div><button class="text-button" type="button" data-open-tab="analysis">查看分析</button></div>
+          <div class="table-wrap"><table><thead><tr><th>物品</th><th>现价</th><th>24h 涨跌</th><th>信号</th><th></th></tr></thead><tbody id="watchlistRows"></tbody></table></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="view-analysis" class="tab-panel" role="tabpanel" aria-labelledby="tab-analysis" hidden>
+      <div class="page-heading">
+        <div><p class="eyebrow">ITEM RESEARCH</p><h1 id="analysis-title">单品深度分析</h1></div>
+        <div class="selected-summary"><span id="selectedItemName">选择一个物品</span><strong id="selectedItemPrice">--</strong><span id="selectedItemChange" class="change-value">--</span><button id="selectedWatch" class="secondary-button" type="button" disabled aria-pressed="false">☆ 收藏</button></div>
+      </div>
+      <div class="analysis-layout">
+        <aside class="item-sidebar" aria-label="物品筛选列表">
+          <label class="field-label" for="itemSearch">搜索物品</label>
+          <input id="itemSearch" type="search" placeholder="名称、分类或 ID">
+          <div class="filter-row">
+            <label class="sr-only" for="categoryFilter">物品分类</label>
+            <select id="categoryFilter"><option value="">全部分类</option></select>
+          </div>
+          <label class="check-control"><input id="watchedOnly" type="checkbox"><span>仅显示收藏</span></label>
+          <div id="itemList" class="item-list" aria-label="物品列表"></div>
+          <p id="itemListStatus" class="list-status" role="status">加载中</p>
+        </aside>
+        <div class="analysis-content">
+          <section class="chart-section">
+            <div class="chart-toolbar">
+              <div class="segmented" role="group" aria-label="图表类型">
+                <button type="button" class="selected" data-chart-type="candlestick">K 线</button>
+                <button type="button" data-chart-type="line">折线</button>
+              </div>
+              <label><span class="sr-only">周期</span><select id="timeframeSelect"><option value="15m">15 分钟</option><option value="4h" selected>4 小时</option><option value="1d">1 天</option></select></label>
+              <div class="segmented range-segment" role="group" aria-label="图表时间范围">
+                <button type="button" data-window="7">7d</button><button type="button" data-window="30">30d</button><button type="button" class="selected" data-window="90">90d</button><button type="button" data-window="all">全部</button>
+              </div>
+              <button id="refreshBars" class="subtle-button" type="button" title="刷新图表">刷新</button>
+            </div>
+            <div id="priceChart" class="chart price-chart" role="img" aria-label="物品价格与预测分位区间图"></div>
+            <div class="chart-legend"><span><i class="legend-dot price-dot"></i>市场价格</span><span><i class="legend-dot forecast-dot"></i>预测 Q10–Q90</span><span><i class="legend-line event-dot"></i>已公告事件</span></div>
+            <p id="chartStatus" class="chart-status" role="status">选择物品后显示价格与预测</p>
+          </section>
+          <div id="forecastSummary" class="forecast-summary" aria-label="24、72、168 小时预测" aria-live="polite"></div>
+          <section class="detail-grid">
+            <div class="chart-section secondary-chart-section">
+              <div class="section-heading compact"><div><h2>盘口卖压与隐含成交</h2><p>可见挂量与估算成交量</p></div></div>
+              <div id="depthChart" class="chart depth-chart" role="img" aria-label="盘口卖压和隐含成交量图"></div>
+            </div>
+            <div class="drivers-section">
+              <div class="section-heading compact"><div><h2>Top-5 驱动因子</h2><p id="driverHorizon">最近预测</p></div></div>
+              <div id="driversChart" class="chart drivers-chart" role="img" aria-label="预测驱动因子重要性"></div>
+            </div>
+          </section>
+          <section class="simulator-section">
+            <div class="section-heading compact"><div><h2>GTL 多槽位扣税保本模拟</h2><p>按标的堆叠上限与转卖概率估算</p></div></div>
+            <form id="feeForm" class="fee-form">
+              <label>买入价<input name="buy_price" type="number" min="0" step="1" required value="1000"></label>
+              <label>卖出价<input name="sell_price" type="number" min="1" step="1" required value="1200"></label>
+              <label>数量<input name="qty" type="number" min="1" step="1" required value="99"></label>
+              <label>堆叠上限<input name="max_stack_size" type="number" min="1" step="1" value="99"></label>
+              <label>预期重挂率<input name="relist_rate" type="number" min="0" max="1" step="0.01" value="0.15"></label>
+              <button class="primary-button" type="submit">计算税费</button>
+            </form>
+            <div id="feeResult" class="result-strip" aria-live="polite"><span>填写价格与数量后计算</span></div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-backtest" class="tab-panel" role="tabpanel" aria-labelledby="tab-backtest" hidden>
+      <div class="page-heading"><div><p class="eyebrow">WALK-FORWARD LAB</p><h1 id="backtest-title">回测实验室</h1></div></div>
+      <section class="data-section backtest-controls">
+        <form id="backtestForm" class="backtest-form">
+          <label>标的<select id="backtestItem" name="item_id"><option value="">全部可用物品</option></select></label>
+          <label>分类<select id="backtestCategory" name="category"><option value="">全部分类</option></select></label>
+          <label>周期<select name="horizon_hours"><option value="24">24 小时</option><option value="72" selected>72 小时</option><option value="168">7 天</option></select></label>
+          <fieldset><legend>模型</legend><label class="check-control"><input type="checkbox" name="models" value="naive" checked><span>Naive</span></label><label class="check-control"><input type="checkbox" name="models" value="statistical" checked><span>Statistical</span></label><label class="check-control"><input type="checkbox" name="models" value="lightgbm" checked><span>LightGBM</span></label></fieldset>
+          <button id="runBacktest" class="primary-button" type="submit">运行回测</button>
+        </form>
+      </section>
+      <section class="data-section backtest-results">
+        <div class="section-heading"><div><h2>模型对比</h2><p id="backtestStatus">选择标的与模型后运行</p></div></div>
+        <div class="table-wrap"><table><thead><tr><th>模型</th><th>累计净收益</th><th>Sharpe</th><th>最大回撤</th><th>胜率</th><th>交易数</th><th>Pinball Loss</th><th>ROC-AUC</th><th>区间覆盖率</th></tr></thead><tbody id="backtestRows"></tbody></table></div>
+        <div id="equityChart" class="chart equity-chart" role="img" aria-label="回测净值曲线"></div>
+      </section>
+    </section>
+
+    <section id="view-data" class="tab-panel" role="tabpanel" aria-labelledby="tab-data" hidden>
+      <div class="page-heading"><div><p class="eyebrow">DATA OPERATIONS</p><h1 id="data-title">数据中心与手工录入</h1></div><p id="envNotice" class="env-notice">读取环境状态中</p></div>
+      <div class="data-center-grid">
+        <section class="data-section operations-section">
+          <div class="section-heading"><div><h2>数据任务</h2><p>任务状态由当前环境与 API 健康状态决定</p></div></div>
+          <div class="operation-list">
+            <div class="operation-row"><div><strong>采集市场快照</strong><span>从官方只读 Auctions API 获取数据</span></div><button type="button" data-admin-action="collect" disabled>开始采集</button></div>
+            <div class="operation-row"><div><strong>同步物品词典</strong><span>更新名称与分类映射</span></div><button type="button" data-admin-action="sync_catalog" disabled>同步词典</button></div>
+            <div class="operation-row"><div><strong>生成价格预测</strong><span>更新预测分位数与信号</span></div><button type="button" data-admin-action="forecast" disabled>运行预测</button></div>
+            <div class="operation-row"><div><strong>运行市场仿真</strong><span>仅允许在 SIM 环境执行</span></div><button type="button" data-admin-action="simulate" disabled>运行仿真</button></div>
+          </div>
+          <p id="jobMessage" class="form-message" aria-live="polite"></p>
+        </section>
+        <section class="data-section">
+          <div class="section-heading"><div><h2>手工报价</h2><p>写入本地报价并保留快照 K 线</p></div></div>
+          <form id="quoteForm" class="stacked-form">
+            <label>物品<select name="item_id" id="quoteItem" required></select></label>
+            <div class="form-pair"><label>报价<input name="price" type="number" min="1" step="1" required></label><label>挂单数量<input name="listed_qty" type="number" min="0" step="1"></label></div>
+            <label>报价时间<input name="recorded_at" type="datetime-local"><small>留空使用当前时间；时间按本机时区输入</small></label>
+            <label>备注<input name="note" type="text" maxlength="2000" placeholder="可选"></label>
+            <button class="primary-button" type="submit">保存报价</button>
+          </form>
+          <p id="quoteMessage" class="form-message" aria-live="polite"></p>
+        </section>
+        <section class="data-section">
+          <div class="section-heading"><div><h2>CSV 导入与导出</h2><p>UTF-8 / Excel BOM；最多 5 MB、50,000 行；价格须为正整数</p></div></div>
+          <form id="csvImportForm" class="stacked-form">
+            <label>CSV 文件<input name="file" type="file" accept=".csv,text/csv" required></label>
+            <button class="primary-button" type="submit">导入 CSV</button>
+          </form>
+          <div class="export-row"><label>导出周期<select id="exportTimeframe"><option value="15m">15 分钟</option><option value="4h" selected>4 小时</option><option value="1d">1 天</option></select></label><button id="exportCsv" class="secondary-button" type="button" disabled>导出所选物品</button></div>
+          <p id="exportItemLabel" class="form-message">尚未选择导出物品</p>
+          <p id="csvMessage" class="form-message" aria-live="polite"></p>
+        </section>
+        <section class="data-section events-section">
+          <div class="section-heading"><div><h2>事件日历</h2><p>仅使用已公告事件作为分析标记</p></div><button id="refreshEvents" class="text-button" type="button">刷新</button></div>
+          <form id="eventForm" class="event-form">
+            <label>事件名称<input name="name" type="text" maxlength="120" required></label>
+            <label>类型<input name="event_type" type="text" maxlength="60" required placeholder="holiday"></label>
+            <label>影响范围<input name="impact_scope" type="text" value="all" maxlength="120"></label>
+            <label>公告时间<input name="announced_at" type="datetime-local" required></label>
+            <label>开始时间<input name="start_ts" type="datetime-local" required></label>
+            <label>结束时间<input name="end_ts" type="datetime-local" required></label>
+            <label class="event-notes">备注<input name="notes" type="text" maxlength="2000"></label>
+            <button class="primary-button" type="submit">添加事件</button>
+          </form>
+          <p id="eventMessage" class="form-message" aria-live="polite"></p>
+          <div id="eventList" class="event-list"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

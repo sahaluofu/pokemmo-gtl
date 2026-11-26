@@ -1,0 +1,17 @@
+rp_vouchers:
+  - {item_id: 1190, denomination: 100}
+  - {item_id: 1191, denomination: 500}
+  - {item_id: 1192, denomination: 1000}
+upstream_relations:
+  # Leppa: 2 spicy + 1 sweet + 1 bitter (one Very Spicy + two Plain seeds).
+  - {target_item_id: 138, upstream_item_id: 1031, weight: 0.5}
+  - {target_item_id: 138, upstream_item_id: 1034, weight: 0.25}
+  - {target_item_id: 138, upstream_item_id: 1036, weight: 0.25}
+  # Lum: 2 spicy + 2 dry + 2 sweet.
+  - {target_item_id: 141, upstream_item_id: 1031, weight: 0.3333333333333333}
+  - {target_item_id: 141, upstream_item_id: 1033, weight: 0.3333333333333333}
+  - {target_item_id: 141, upstream_item_id: 1035, weight: 0.3333333333333333}
+  # Sitrus: 2 sweet + 2 bitter + 2 sour.
+  - {target_item_id: 142, upstream_item_id: 1035, weight: 0.3333333333333333}
+  - {target_item_id: 142, upstream_item_id: 1037, weight: 0.3333333333333333}
+  - {target_item_id: 142, upstream_item_id: 1039, weight: 0.3333333333333333}

@@ -1,0 +1,11 @@
+poll_interval_sec: 900
+rate_limit_tokens: 28000
+rate_limit_window_sec: 305
+retention_hours: 48
+expiry_grace_sec: 180
+max_diff_gap_sec: 5400
+alpha_near: 0.75
+alpha_mid: 0.20
+alpha_far: 0.0
+ref_notional_yen: 500000
+simulation_default_end_ts: 1768435200

@@ -1,0 +1,389 @@
+[
+  {
+    "item_id": 4,
+    "name_en": "Poké Ball",
+    "name_zh": "精灵球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 3,
+    "name_en": "Great Ball",
+    "name_zh": "超级球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 2,
+    "name_en": "Ultra Ball",
+    "name_zh": "高级球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 6,
+    "name_en": "Net Ball",
+    "name_zh": "捕网球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 7,
+    "name_en": "Dive Ball",
+    "name_zh": "潜水球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 8,
+    "name_en": "Nest Ball",
+    "name_zh": "巢穴球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 9,
+    "name_en": "Repeat Ball",
+    "name_zh": "重复球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 10,
+    "name_en": "Timer Ball",
+    "name_zh": "计时球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 12,
+    "name_en": "Premier Ball",
+    "name_zh": "纪念球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 5013,
+    "name_en": "Dusk Ball",
+    "name_zh": "黑暗球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 5015,
+    "name_en": "Quick Ball",
+    "name_zh": "先机球",
+    "category": "pokeball",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1190,
+    "name_en": "100RP Reward Point Voucher",
+    "name_zh": "100RP 点券",
+    "category": "rp_voucher",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 1191,
+    "name_en": "500RP Reward Point Voucher",
+    "name_zh": "500RP 点券",
+    "category": "rp_voucher",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 1192,
+    "name_en": "1,000RP Reward Point Voucher",
+    "name_zh": "1000RP 点券",
+    "category": "rp_voucher",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 138,
+    "name_en": "Leppa Berry",
+    "name_zh": "苹野果（PP果）",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 139,
+    "name_en": "Oran Berry",
+    "name_zh": "橙橙果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 141,
+    "name_en": "Lum Berry",
+    "name_zh": "木子果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 142,
+    "name_en": "Sitrus Berry",
+    "name_zh": "文柚果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 133,
+    "name_en": "Cheri Berry",
+    "name_zh": "樱子果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 134,
+    "name_en": "Chesto Berry",
+    "name_zh": "零余果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 135,
+    "name_en": "Pecha Berry",
+    "name_zh": "桃桃果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 153,
+    "name_en": "Pomeg Berry",
+    "name_zh": "榴石果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 154,
+    "name_en": "Kelpsy Berry",
+    "name_zh": "藻根果",
+    "category": "berry",
+    "asset_class": "berry",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1030,
+    "name_en": "Plain Spicy Seed",
+    "name_zh": "普通辛辣种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1031,
+    "name_en": "Very Spicy Seed",
+    "name_zh": "超辣种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 1032,
+    "name_en": "Plain Dry Seed",
+    "name_zh": "普通干涩种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1033,
+    "name_en": "Very Dry Seed",
+    "name_zh": "超涩种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1034,
+    "name_en": "Plain Sweet Seed",
+    "name_zh": "普通甜味种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 1035,
+    "name_en": "Very Sweet Seed",
+    "name_zh": "超甜种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1036,
+    "name_en": "Plain Bitter Seed",
+    "name_zh": "普通苦味种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 1037,
+    "name_en": "Very Bitter Seed",
+    "name_zh": "超苦种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1038,
+    "name_en": "Plain Sour Seed",
+    "name_zh": "普通酸味种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 1039,
+    "name_en": "Very Sour Seed",
+    "name_zh": "超酸种子",
+    "category": "berry_seed",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": false
+  },
+  {
+    "item_id": 189,
+    "name_en": "Amulet Coin",
+    "name_zh": "护符金币",
+    "category": "held_item",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 69,
+    "name_en": "Pp Up",
+    "name_zh": "PP提升剂",
+    "category": "battle_item",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 71,
+    "name_en": "Pp Max",
+    "name_zh": "PP最大剂",
+    "category": "battle_item",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 1476,
+    "name_en": "Goodie Bag",
+    "name_zh": "万圣节礼袋",
+    "category": "event_box",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 1431,
+    "name_en": "Xmas Present",
+    "name_zh": "圣诞节礼袋",
+    "category": "event_box",
+    "asset_class": "item",
+    "max_stack_size": 99,
+    "is_watched": true
+  },
+  {
+    "item_id": 2269,
+    "name_en": "Santa Hat",
+    "name_zh": "圣诞帽",
+    "category": "cosmetic",
+    "asset_class": "cosmetic",
+    "max_stack_size": 1,
+    "is_watched": true
+  },
+  {
+    "item_id": 2347,
+    "name_en": "Santa's Little Helper Hat",
+    "name_zh": "圣诞小助手帽",
+    "category": "cosmetic",
+    "asset_class": "cosmetic",
+    "max_stack_size": 1,
+    "is_watched": false
+  },
+  {
+    "item_id": 900001,
+    "name_en": "Pokemon Material: 1x31",
+    "name_zh": "示范精灵素材：1×31",
+    "category": "pokemon_category",
+    "asset_class": "pokemon_category",
+    "max_stack_size": 1,
+    "is_watched": false
+  },
+  {
+    "item_id": 900002,
+    "name_en": "Pokemon Material: 2x31",
+    "name_zh": "示范精灵素材：2×31",
+    "category": "pokemon_category",
+    "asset_class": "pokemon_category",
+    "max_stack_size": 1,
+    "is_watched": false
+  },
+  {
+    "item_id": 900003,
+    "name_en": "Pokemon Material: Nature",
+    "name_zh": "示范精灵素材：性格",
+    "category": "pokemon_category",
+    "asset_class": "pokemon_category",
+    "max_stack_size": 1,
+    "is_watched": false
+  }
+]
