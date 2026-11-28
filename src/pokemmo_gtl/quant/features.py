@@ -2,14 +2,14 @@
 
 The feature builder works on the ``item_bars`` shaped records produced by the
 pipeline, but deliberately accepts ordinary mappings and lists of mappings as
-well.  Every feature is indexed by a UTC four-hour close timestamp.  A value
+well. Every feature is indexed by a UTC four-hour close timestamp. A value
 at ``close_ts`` therefore only uses records whose timestamp is at most that
 timestamp; this is also true for the RP, upstream, manual and event joins.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from math import floor, isfinite, log
 from typing import Any
@@ -23,7 +23,7 @@ GRID_SECONDS = 14_400
 DAY_SECONDS = 86_400
 REF_NOTIONAL = 500_000
 
-# These are the columns consumed by the model layer.  ``build_feature_frame``
+# These are the columns consumed by the model layer. ``build_feature_frame``
 # also retains the source bar columns, which is useful for diagnostics.
 FEATURE_COLUMNS = [
     "close_price",
@@ -219,9 +219,32 @@ def _with_grid(
         merged["__observed"] = merged["__observed"].fillna(False).astype(bool)
         pure_manual = bool(group["data_source"].eq("manual").all())
         limit = 18 if pure_manual else 6
+
+        empty_reset = pd.Series(False, index=merged.index)
+        mixed_history = pd.Series(False, index=merged.index)
+        if "book_state" in merged.columns:
+            empty_reset = merged["__observed"] & merged["book_state"].isin(
+                ["empty_confirmed", "mixed_ended_empty"]
+            )
+            mixed_history = empty_reset & merged["book_state"].eq(
+                "mixed_ended_empty"
+            ).fillna(False)
+        reset_groups = empty_reset.cumsum()
+        has_empty_reset = bool(empty_reset.any())
         for column in _PRICE_COLUMNS:
             if column in merged.columns:
-                merged[column] = _number(merged[column]).ffill(limit=limit)
+                values = _number(merged[column])
+                if has_empty_reset:
+                    # An observed empty book invalidates every earlier fill.
+                    # Mixed bars retain their recorded history at that bar,
+                    # but that history must not seed subsequent grid rows.
+                    filled = values.mask(empty_reset).groupby(
+                        reset_groups, sort=False
+                    ).ffill(limit=limit)
+                    merged[column] = filled.where(~mixed_history, values)
+                else:
+                    merged[column] = values.ffill(limit=limit)
+
         # The source columns are intentionally not forward filled for flow.
         if "data_source" in merged.columns:
             merged["data_source"] = merged["data_source"].ffill().fillna(
@@ -358,26 +381,169 @@ def _relation_mapping(
     return [value for value in values if isinstance(value, Mapping)]
 
 
+def _empty_quote_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "close_ts": pd.Series(dtype="int64"),
+            "close_price": pd.Series(dtype="float64"),
+        }
+    )
+
+
 def _source_for_item(source: pd.DataFrame, item_id: int) -> pd.DataFrame:
+    """Select observed live quotes, excluding every non-stocked bar."""
+
     if source.empty or "item_id" not in source.columns:
-        return pd.DataFrame(columns=["close_ts", "close_price"])
+        return _empty_quote_frame()
     result = source.loc[source["item_id"].eq(item_id)].copy()
     if result.empty or "close_price" not in result.columns:
-        return pd.DataFrame(columns=["close_ts", "close_price"])
+        return _empty_quote_frame()
     result["close_price"] = _number(result["close_price"])
-    result = result.loc[result["close_price"].notna()].sort_values("close_ts")
-    return result.drop_duplicates("close_ts", keep="last")
+    # Resolve duplicate observations before filtering: an empty final
+    # observation must not expose an earlier stocked row at the same time.
+    result = result.sort_values("close_ts", kind="mergesort")
+    result = result.drop_duplicates("close_ts", keep="last")
+    if "book_state" in result.columns:
+        stocked = result["book_state"].eq("stocked").fillna(False)
+        result = result.loc[stocked]
+    return result.loc[result["close_price"].notna()].copy()
+
+
+def _quote_source_for_item(source: pd.DataFrame, item_id: int) -> pd.DataFrame:
+    """Retain invalid observations as null barriers for backward quote joins.
+
+    Simply dropping an empty observation would let an as-of join reuse the
+    preceding stocked quote. Its timestamp therefore remains present with a
+    null price until a later stocked observation supplies a new live quote.
+    """
+
+    values = _source_for_item(source, item_id)
+    if (
+        source.empty
+        or "item_id" not in source.columns
+        or "close_price" not in source.columns
+    ):
+        return values
+    observed = source.loc[source["item_id"].eq(item_id), ["close_ts"]]
+    observed = observed.drop_duplicates().sort_values(
+        "close_ts", kind="mergesort"
+    ).reset_index(drop=True)
+    if values.empty:
+        return observed.assign(close_price=np.nan)
+    return observed.merge(
+        values[["close_ts", "close_price"]],
+        on="close_ts",
+        how="left",
+        sort=True,
+        validate="one_to_one",
+    )
 
 
 def _asof_price(
-    timeline: pd.DataFrame, source: pd.DataFrame, column: str = "close_price"
+    timeline: pd.DataFrame,
+    source: pd.DataFrame,
+    column: str = "close_price",
+    *,
+    max_age_sec: int | None = DAY_SECONDS,
 ) -> pd.Series:
-    if source.empty:
+    """Align a quote causally, respecting freshness and null reset markers."""
+
+    if timeline.empty or source.empty:
         return pd.Series(np.nan, index=timeline.index, dtype=float)
-    right = source[["close_ts", column]].rename(columns={column: "__value"}).sort_values("close_ts")
-    left = timeline[["close_ts"]].sort_values("close_ts")
-    joined = pd.merge_asof(left, right, on="close_ts", direction="backward")
-    return joined.set_index(left.index).reindex(timeline.index)["__value"]
+    right = source[["close_ts", column]].rename(columns={column: "__value"})
+    right = right.sort_values("close_ts", kind="mergesort")
+    right = right.drop_duplicates("close_ts", keep="last")
+    left = timeline[["close_ts"]].copy()
+    left["__position"] = np.arange(len(left), dtype="int64")
+    left = left.sort_values("close_ts", kind="mergesort")
+    joined = pd.merge_asof(
+        left,
+        right,
+        on="close_ts",
+        direction="backward",
+        tolerance=max_age_sec,
+    )
+    joined = joined.sort_values("__position", kind="mergesort")
+    return pd.Series(
+        joined["__value"].to_numpy(dtype=float, na_value=np.nan),
+        index=timeline.index,
+        dtype=float,
+    )
+
+
+def compute_rp_yen_per_unit(
+    voucher_bars: pd.DataFrame,
+    relations: Sequence[Mapping[str, Any]],
+    *,
+    timeline_ts: pd.Series | np.ndarray | None = None,
+    max_quote_age_sec: int = DAY_SECONDS,
+) -> pd.DataFrame:
+    """Return the median fresh stocked voucher price in yen per RP.
+
+    The output contains one row per distinct requested timestamp, sorted by
+    ``close_ts``. Without an explicit timeline, voucher observation timestamps
+    are used. The 24h return compares separately evaluated indices at ``t``
+    and ``t - 86400``, so it also works for sparse or irregular timelines.
+    Empty-book observations invalidate earlier quotes immediately.
+    """
+
+    vouchers = _normalise_bars(voucher_bars, timeframe="4h")
+    if timeline_ts is None:
+        timestamps = vouchers.get("close_ts", pd.Series(dtype="int64"))
+    else:
+        timestamps = pd.Series(timeline_ts)
+    timestamps = _number(timestamps).dropna().astype("int64")
+    timeline = pd.DataFrame({"close_ts": np.sort(timestamps.unique())})
+    result = timeline.copy()
+    result["rp_index"] = np.nan
+    result["rp_ret_24h"] = np.nan
+    if timeline.empty or not relations:
+        return result
+
+    prior_timeline = timeline.assign(close_ts=timeline["close_ts"] - DAY_SECONDS)
+    current_points: list[pd.Series] = []
+    prior_points: list[pd.Series] = []
+    for relation in relations:
+        item_id = relation.get("item_id")
+        denomination = pd.to_numeric(relation.get("denomination"), errors="coerce")
+        if (
+            item_id is None
+            or pd.isna(denomination)
+            or not isfinite(float(denomination))
+            or denomination <= 0
+        ):
+            continue
+        values = _quote_source_for_item(vouchers, int(item_id))
+        values = values.copy()
+        price = values["close_price"]
+        live_price = price.where(np.isfinite(price) & price.gt(0))
+        values["__yen_per_rp"] = live_price / float(denomination)
+        current_points.append(
+            _asof_price(
+                timeline,
+                values,
+                "__yen_per_rp",
+                max_age_sec=max_quote_age_sec,
+            )
+        )
+        prior_points.append(
+            _asof_price(
+                prior_timeline,
+                values,
+                "__yen_per_rp",
+                max_age_sec=max_quote_age_sec,
+            )
+        )
+    if not current_points:
+        return result
+
+    current_index = pd.concat(current_points, axis=1).median(axis=1, skipna=True)
+    prior_index = pd.concat(prior_points, axis=1).median(axis=1, skipna=True)
+    result["rp_index"] = current_index.to_numpy()
+    result["rp_ret_24h"] = current_index.div(
+        prior_index.where(prior_index.gt(0))
+    ).sub(1.0).to_numpy()
+    return result
 
 
 def _add_rp_features(
@@ -385,54 +551,61 @@ def _add_rp_features(
     source: pd.DataFrame,
     relations: list[Mapping[str, Any]],
     rp_bars: pd.DataFrame,
+    *,
+    max_quote_age_sec: int = DAY_SECONDS,
 ) -> pd.DataFrame:
     frame = frame.copy()
     frame["rp_index"] = np.nan
+    frame["rp_ret_24h"] = np.nan
     if not relations:
-        frame["rp_ret_24h"] = np.nan
         return frame
     voucher_source = rp_bars if not rp_bars.empty else source
-    timeline = pd.DataFrame({"close_ts": np.sort(frame["close_ts"].unique())})
-    points: list[pd.Series] = []
-    for relation in relations:
-        item_id = relation.get("item_id")
-        denomination = pd.to_numeric(
-            pd.Series([relation.get("denomination")]), errors="coerce"
-        ).iloc[0]
-        if item_id is None or not isfinite(float(denomination)) or denomination <= 0:
-            continue
-        values = _source_for_item(voucher_source, int(item_id))
-        if values.empty:
-            continue
-        values = values.copy()
-        values["__rp"] = values["close_price"] / float(denomination)
-        points.append(_asof_price(timeline, values.rename(columns={"__rp": "close_price"})))
-    if not points:
-        frame["rp_ret_24h"] = np.nan
-        return frame
-    rp = pd.concat(points, axis=1).median(axis=1, skipna=True)
-    rp_by_ts = pd.DataFrame({"close_ts": timeline["close_ts"], "rp_index": rp.to_numpy()})
-    rp_by_ts["rp_ret_24h"] = rp_by_ts["rp_index"].div(
-        rp_by_ts["rp_index"].shift(6)
-    ).sub(1.0)
-    index_lookup = dict(zip(rp_by_ts["close_ts"], rp_by_ts["rp_index"], strict=True))
-    return_values = dict(zip(rp_by_ts["close_ts"], rp_by_ts["rp_ret_24h"], strict=True))
-    frame["rp_index"] = frame["close_ts"].map(index_lookup)
-    frame["rp_ret_24h"] = frame["close_ts"].map(return_values)
+    rp_by_ts = compute_rp_yen_per_unit(
+        voucher_source,
+        relations,
+        timeline_ts=frame["close_ts"].to_numpy(),
+        max_quote_age_sec=max_quote_age_sec,
+    ).set_index("close_ts")
+    frame["rp_index"] = frame["close_ts"].map(rp_by_ts["rp_index"])
+    frame["rp_ret_24h"] = frame["close_ts"].map(rp_by_ts["rp_ret_24h"])
     return frame
 
 
-def _return_series(source: pd.DataFrame, item_id: int) -> pd.DataFrame:
-    values = _source_for_item(source, item_id)
+def _return_series(
+    source: pd.DataFrame,
+    item_id: int,
+    *,
+    max_age_sec: int = DAY_SECONDS,
+) -> pd.DataFrame:
+    """Compute observed 24h returns using fresh quotes at both endpoints."""
+
+    values = _quote_source_for_item(source, item_id)
     if values.empty:
         return pd.DataFrame(columns=["close_ts", "upstream_ret_24h"])
-    timeline = values[["close_ts"]].drop_duplicates().sort_values("close_ts")
+    timeline = values[["close_ts"]].drop_duplicates().sort_values(
+        "close_ts", kind="mergesort"
+    ).reset_index(drop=True)
     prices = values[["close_ts", "close_price"]]
-    now = pd.merge_asof(timeline, prices, on="close_ts", direction="backward")
+    now = pd.merge_asof(
+        timeline,
+        prices,
+        on="close_ts",
+        direction="backward",
+        tolerance=max_age_sec,
+    )
     prior = timeline.assign(close_ts=timeline["close_ts"] - DAY_SECONDS)
-    prior = pd.merge_asof(prior, prices, on="close_ts", direction="backward")
+    prior = pd.merge_asof(
+        prior,
+        prices,
+        on="close_ts",
+        direction="backward",
+        tolerance=max_age_sec,
+    )
     result = timeline.copy()
-    result["upstream_ret_24h"] = now["close_price"].div(prior["close_price"]).sub(1.0).to_numpy()
+    prior_price = prior["close_price"].where(prior["close_price"].gt(0))
+    result["upstream_ret_24h"] = now["close_price"].div(
+        prior_price
+    ).sub(1.0).to_numpy()
     return result
 
 
@@ -441,6 +614,8 @@ def _add_upstream_features(
     source: pd.DataFrame,
     relations: list[Mapping[str, Any]],
     upstream_bars: pd.DataFrame,
+    *,
+    max_age_sec: int = DAY_SECONDS,
 ) -> pd.DataFrame:
     frame = frame.copy()
     frame["upstream_ret_24h"] = np.nan
@@ -454,35 +629,137 @@ def _add_upstream_features(
         if not target_relations:
             continue
         timeline = frame.loc[frame["item_id"].eq(target_id), ["close_ts"]]
-        timeline = timeline.drop_duplicates().sort_values("close_ts")
-        weighted: list[pd.Series] = []
+        timeline = timeline.drop_duplicates().sort_values(
+            "close_ts", kind="mergesort"
+        ).reset_index(drop=True)
+        aligned_returns: list[np.ndarray] = []
         weights: list[float] = []
         for relation in target_relations:
             upstream_id = relation.get("upstream_item_id")
             if upstream_id is None:
                 continue
-            series = _return_series(source, int(upstream_id))
-            if series.empty:
+            weight = pd.to_numeric(relation.get("weight", 1.0), errors="coerce")
+            if pd.isna(weight) or not isfinite(float(weight)):
                 continue
-            joined = pd.merge_asof(timeline, series, on="close_ts", direction="backward")
-            weight = pd.to_numeric(
-                pd.Series([relation.get("weight", 1.0)]), errors="coerce"
-            ).iloc[0]
             weight = float(weight)
-            if not isfinite(weight):
-                continue
-            weighted.append(joined["upstream_ret_24h"] * weight)
+            series = _return_series(
+                source,
+                int(upstream_id),
+                max_age_sec=max_age_sec,
+            )
+            aligned = np.full(len(timeline), np.nan, dtype=float)
+            if not series.empty:
+                joined = pd.merge_asof(
+                    timeline,
+                    series,
+                    on="close_ts",
+                    direction="backward",
+                    tolerance=max_age_sec,
+                )
+                aligned = _number(joined["upstream_ret_24h"]).to_numpy(
+                    dtype=float, na_value=np.nan, copy=True
+                )
+                aligned[~np.isfinite(aligned)] = np.nan
+            effective_from = relation.get("effective_from")
+            if effective_from is not None:
+                inactive = timeline["close_ts"].lt(int(effective_from)).to_numpy()
+                aligned[inactive] = np.nan
+            # Keep a column even for an entirely missing constituent. Matrix
+            # shape and reduction order then depend on relations, not on the
+            # existence of quotes anywhere in the source's future tail.
+            aligned_returns.append(aligned)
             weights.append(weight)
-        if weighted:
-            value = pd.concat(weighted, axis=1).sum(axis=1, min_count=1)
-            if weights and sum(abs(weight) for weight in weights) > 0:
-                value = value / sum(abs(weight) for weight in weights)
-            lookup = pd.DataFrame({"close_ts": timeline["close_ts"], "__up": value.to_numpy()})
+        if aligned_returns:
+            ret_matrix = np.column_stack(aligned_returns)
+            weight_vector = np.asarray(weights, dtype=float)
+            valid_abs_weight_matrix = np.where(
+                np.isfinite(ret_matrix),
+                np.abs(weight_vector),
+                0.0,
+            )
+            numerator = np.nansum(ret_matrix * weight_vector, axis=1)
+            denom = valid_abs_weight_matrix.sum(axis=1)
+            value = np.full(len(timeline), np.nan, dtype=float)
+            np.divide(numerator, denom, out=value, where=denom > 0)
+            lookup = pd.Series(value, index=timeline["close_ts"])
             selected = frame["item_id"].eq(target_id)
-            frame.loc[selected, "upstream_ret_24h"] = frame.loc[selected, ["close_ts"]].merge(
-                lookup, on="close_ts", how="left"
-            )["__up"].to_numpy()
+            frame.loc[selected, "upstream_ret_24h"] = frame.loc[
+                selected, "close_ts"
+            ].map(lookup).to_numpy()
     return frame
+
+
+def compute_recipe_floor_cost(
+    source: pd.DataFrame,
+    recipe_items: Sequence[Mapping[str, Any]],
+    timeline_ts: Sequence[int],
+    *,
+    max_age_sec: int = GRID_SECONDS,
+) -> pd.Series:
+    """Return complete active-recipe costs, or NaN when any cost is unknown.
+
+    Each ingredient uses ``item_id`` (or ``upstream_item_id``), a positive
+    ``qty`` (or ``quantity``, default 1), and optional ``effective_from``.
+    Only ingredients effective at ``t`` contribute to its recipe. Every
+    active ingredient must have a fresh stocked quote at ``t``; a missing,
+    nonpositive, nonfinite, empty-book, or expired quote makes the entire
+    recipe unknown. An empty recipe, or one with no active ingredients,
+    is also unknown.
+
+    The returned Series has a ``close_ts`` index in the supplied order,
+    including duplicate timestamps, and is named ``recipe_floor_cost``.
+    """
+
+    timestamps = np.asarray(timeline_ts, dtype="int64")
+    timeline = pd.DataFrame({"close_ts": timestamps})
+    bars = _normalise_bars(source, timeframe="4h")
+    total = np.zeros(len(timeline), dtype=float)
+    unknown = np.zeros(len(timeline), dtype=bool)
+    has_active = np.zeros(len(timeline), dtype=bool)
+
+    for ingredient in recipe_items:
+        active = np.ones(len(timeline), dtype=bool)
+        effective_from = ingredient.get("effective_from")
+        if effective_from is not None:
+            active = timestamps >= int(effective_from)
+        has_active |= active
+        if not active.any():
+            continue
+        quantity = pd.to_numeric(
+            ingredient.get("qty", ingredient.get("quantity", 1.0)),
+            errors="coerce",
+        )
+        if (
+            pd.isna(quantity)
+            or not isfinite(float(quantity))
+            or quantity <= 0
+        ):
+            unknown |= active
+            continue
+        try:
+            item_id = int(
+                ingredient.get("item_id", ingredient.get("upstream_item_id"))
+            )
+        except (TypeError, ValueError, OverflowError):
+            unknown |= active
+            continue
+        values = _quote_source_for_item(bars, item_id)
+        prices = _asof_price(
+            timeline,
+            values,
+            max_age_sec=max_age_sec,
+        ).to_numpy(dtype=float, na_value=np.nan)
+        valid = np.isfinite(prices) & (prices > 0)
+        unknown |= active & ~valid
+        total += np.where(active & valid, prices * float(quantity), 0.0)
+
+    total[unknown | ~has_active | ~np.isfinite(total)] = np.nan
+    return pd.Series(
+        total,
+        index=pd.Index(timestamps, name="close_ts"),
+        name="recipe_floor_cost",
+        dtype=float,
+    )
 
 
 def _add_manual_features(frame: pd.DataFrame, manual_bars: pd.DataFrame) -> pd.DataFrame:
@@ -576,9 +853,11 @@ def build_feature_frame(
     """Build a causal feature panel from 4h item bars.
 
     ``bars`` may be a DataFrame, a list of records or a mapping of item IDs to
-    records.  When a table contains multiple timeframes only its ``4h`` rows
+    records. When a table contains multiple timeframes only its ``4h`` rows
     are used as the primary panel; pass ``manual_bars`` for separate ``1d``
-    manual quotes.  Missing optional tables simply produce NaN feature columns.
+    manual quotes. Missing optional tables simply produce NaN feature columns.
+    Quote ages default to 24h and can be configured with
+    ``max_rp_quote_age_sec`` and ``max_upstream_quote_age_sec``.
     """
 
     primary_input = item_bars if item_bars is not None else bars
@@ -612,8 +891,20 @@ def build_feature_frame(
         relation_data = getattr(config, "item_relations", None)
     rp_relations = _relation_mapping(relation_data, "rp_vouchers")
     upstream_relations = _relation_mapping(relation_data, "upstream_relations")
-    frame = _add_rp_features(frame, primary, rp_relations, rp)
-    frame = _add_upstream_features(frame, primary, upstream_relations, upstream)
+    frame = _add_rp_features(
+        frame,
+        primary,
+        rp_relations,
+        rp,
+        max_quote_age_sec=_config_value(config, "max_rp_quote_age_sec", DAY_SECONDS),
+    )
+    frame = _add_upstream_features(
+        frame,
+        primary,
+        upstream_relations,
+        upstream,
+        max_age_sec=_config_value(config, "max_upstream_quote_age_sec", DAY_SECONDS),
+    )
     frame = _add_manual_features(frame, manual)
     if market_events is not None:
         event_input = market_events
@@ -661,7 +952,7 @@ def add_targets(
     """Append execution-friction-aware regression and classification labels.
 
     The entry is the current close and the exit is the future maker price
-    ``min(close_price, p10_price)``.  Rows without an exact future grid point
+    ``min(close_price, p10_price)``. Rows without an exact future grid point
     retain NaN targets, which avoids silently shortening a holding period.
     """
 
@@ -760,4 +1051,10 @@ def add_targets(
     return result
 
 
-__all__ = ["FEATURE_COLUMNS", "build_feature_frame", "add_targets"]
+__all__ = [
+    "FEATURE_COLUMNS",
+    "build_feature_frame",
+    "add_targets",
+    "compute_rp_yen_per_unit",
+    "compute_recipe_floor_cost",
+]

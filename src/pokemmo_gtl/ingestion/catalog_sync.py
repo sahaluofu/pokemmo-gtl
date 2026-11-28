@@ -97,11 +97,37 @@ def sync_catalog(
         else int(time.time())
     )
     with open_connection(db_path) as conn, write_transaction(conn):
+        has_api_covered = any(
+            row[1] == "api_covered"
+            for row in conn.execute("PRAGMA table_info(items_catalog)")
+        )
+        coverage_column = ", api_covered" if has_api_covered else ""
+        coverage_value = ", ?" if has_api_covered else ""
+        coverage_update = ", api_covered = excluded.api_covered" if has_api_covered else ""
+        catalog_rows = []
+        for item in sorted(records.values(), key=lambda record: record["item_id"]):
+            api_covered = (
+                0
+                if (
+                    item.get("asset_class") == "pokemon_category"
+                    or int(item["item_id"]) >= 900_000
+                )
+                else int(item.get("api_covered", 1))
+            )
+            row = (
+                item["item_id"], item.get("asset_class", "item"), item["name_en"],
+                item.get("name_zh"), item.get("category", "other"),
+                item.get("max_stack_size", 99), item.get("description"),
+                int(bool(item.get("is_watched", False))), updated_at,
+            )
+            if has_api_covered:
+                row += (api_covered,)
+            catalog_rows.append(row)
         conn.executemany(
-            """INSERT INTO items_catalog
+            f"""INSERT INTO items_catalog
                (item_id, asset_class, name_en, name_zh, category, max_stack_size,
-                description, is_watched, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                description, is_watched, updated_at{coverage_column})
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{coverage_value})
                ON CONFLICT(item_id) DO UPDATE SET
                  asset_class = excluded.asset_class,
                  name_en = excluded.name_en,
@@ -110,16 +136,8 @@ def sync_catalog(
                  max_stack_size = excluded.max_stack_size,
                  description = COALESCE(excluded.description, items_catalog.description),
                  is_watched = excluded.is_watched,
-                 updated_at = excluded.updated_at""",
-            [
-                (
-                    item["item_id"], item.get("asset_class", "item"), item["name_en"],
-                    item.get("name_zh"), item.get("category", "other"),
-                    item.get("max_stack_size", 99), item.get("description"),
-                    int(bool(item.get("is_watched", False))), updated_at,
-                )
-                for item in sorted(records.values(), key=lambda record: record["item_id"])
-            ],
+                 updated_at = excluded.updated_at{coverage_update}""",
+            catalog_rows,
         )
         for event in app_config.events:
             _upsert_event(conn, event)
@@ -205,6 +223,11 @@ def _normalize_payload(payload: Any) -> list[dict[str, Any]]:
                 entry[key] = source[key]
         if "max_stack_size" in source or "stack_size" in source:
             entry["max_stack_size"] = stack
+        if "api_covered" in source:
+            try:
+                entry["api_covered"] = int(source["api_covered"])
+            except (ValueError, TypeError, OverflowError):
+                continue
         records.append(entry)
     return records
 

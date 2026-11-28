@@ -82,10 +82,12 @@ def _header_timestamp(value: str | None) -> int | None:
 class OfficialApiCollector:
     """Collect one snapshot while holding a shared, renewable collector lease.
 
-    ``post_snapshot_hook(conn, snapshot_id)`` runs after raw rows and the server
-    timestamp are visible in the phase-two transaction, while status is still
+    ``post_snapshot_hook(conn, snapshot_id)`` runs after raw rows and collection
+    watermarks are visible in the phase-two transaction, while status is still
     ``running``. M3 may write flows and bars there using this same connection;
     it must not commit, open a nested write transaction, or perform network I/O.
+    The publication timestamp is fixed before the hook so its revisions and the
+    completed snapshot retain the same availability watermark.
     Any hook failure rolls back the entire snapshot, including its catalog rows.
     Supplied clients/limiters remain owned by their caller.
     """
@@ -217,26 +219,35 @@ class OfficialApiCollector:
             page.append(AuctionListing(**values))
         return page
 
-    def _fetch(self, lease: CollectorLock) -> tuple[list[AuctionListing], int, int]:
+    def _fetch(self, lease: CollectorLock) -> tuple[list[AuctionListing], int, int, int]:
         listings: dict[int, AuctionListing] = {}
         skip = None
         server_started_at = int(self._clock())
+        last_page_server_at = server_started_at
         for pages_fetched in range(1, MAX_PAGES + 1):
             response = self._request_page(skip, lease)
             try:
+                timestamp = _header_timestamp(response.headers.get("Date"))
+                page_server_at = timestamp if timestamp is not None else int(self._clock())
                 if pages_fetched == 1:
-                    timestamp = _header_timestamp(response.headers.get("Date"))
-                    server_started_at = timestamp if timestamp is not None else int(self._clock())
+                    server_started_at = page_server_at
+                last_page_server_at = page_server_at
                 page = self._parse_page(response)
             finally:
                 response.close()
             if not page:
-                return list(listings.values()), server_started_at, pages_fetched
+                return (
+                    list(listings.values()), server_started_at,
+                    last_page_server_at, pages_fetched,
+                )
             for listing in page:
                 listings.setdefault(listing.auction_id, listing)
             min_id = min(listing.auction_id for listing in page)
             if min_id <= 1:
-                return list(listings.values()), server_started_at, pages_fetched
+                return (
+                    list(listings.values()), server_started_at,
+                    last_page_server_at, pages_fetched,
+                )
             next_skip = min_id - 1
             if skip is not None and next_skip >= skip:
                 raise ApiPaginationError("Auction cursor must strictly decrease")
@@ -246,6 +257,12 @@ class OfficialApiCollector:
     def _start_snapshot(self) -> int:
         now = int(self._clock())
         with open_connection(self.db_path) as conn, write_transaction(conn):
+            snapshot_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(snapshot_runs)")
+            }
+            retention_clause = (
+                ", raw_retained = 0" if "raw_retained" in snapshot_columns else ""
+            )
             conn.execute(
                 "DELETE FROM raw_listings WHERE snapshot_id IN "
                 "(SELECT snapshot_id FROM snapshot_runs WHERE status = 'running' "
@@ -253,7 +270,8 @@ class OfficialApiCollector:
             )
             conn.execute(
                 "UPDATE snapshot_runs SET status = 'failed', completed_at = ?, "
-                "error_message = 'Stale running snapshot recovered' "
+                "error_message = 'Stale running snapshot recovered'"
+                f"{retention_clause} "
                 "WHERE status = 'running' AND started_at < ?",
                 (now, now - STALE_SNAPSHOT_SEC),
             )
@@ -265,15 +283,31 @@ class OfficialApiCollector:
 
     def _persist(
         self, snapshot_id: int, listings: list[AuctionListing], server_started_at: int,
-        pages_fetched: int, lease: CollectorLock,
+        last_page_server_at: int, pages_fetched: int, lease: CollectorLock,
     ) -> None:
         with open_connection(self.db_path) as conn, write_transaction(conn):
+            # Reserve one timestamp before the hook. Re-reading the clock afterward
+            # could make snapshot availability disagree with its published revisions.
+            commit_ts = int(self._clock())
+            available_at = max(commit_ts, last_page_server_at)
+            has_api_covered = any(
+                row[1] == "api_covered"
+                for row in conn.execute("PRAGMA table_info(items_catalog)")
+            )
+            catalog_columns = [
+                "item_id", "name_en", "category", "max_stack_size", "updated_at",
+            ]
+            if has_api_covered:
+                catalog_columns.append("api_covered")
             conn.executemany(
                 "INSERT OR IGNORE INTO items_catalog "
-                "(item_id, name_en, category, max_stack_size, updated_at) "
-                "VALUES (?, ?, 'unknown', 99, ?)",
-                [(item_id, f"Unknown Item #{item_id}", int(self._clock()))
-                 for item_id in sorted({listing.reference_id for listing in listings})],
+                f"({', '.join(catalog_columns)}) "
+                f"VALUES ({', '.join('?' for _ in catalog_columns)})",
+                [
+                    (item_id, f"Unknown Item #{item_id}", "unknown", 99, commit_ts)
+                    + ((int(item_id < 900_000),) if has_api_covered else ())
+                    for item_id in sorted({listing.reference_id for listing in listings})
+                ],
             )
             conn.executemany(
                 "INSERT INTO raw_listings "
@@ -282,30 +316,59 @@ class OfficialApiCollector:
                 [(snapshot_id, row.auction_id, row.reference_id, row.price,
                   row.quantity, row.expires_at) for row in listings],
             )
+            snapshot_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(snapshot_runs)")
+            }
+            metadata = {
+                "server_started_at": server_started_at,
+                "total_listings": len(listings),
+                "pages_fetched": pages_fetched,
+            }
+            for name, value in (
+                ("last_page_server_at", last_page_server_at),
+                ("available_at", available_at),
+                ("raw_retained", 1),
+            ):
+                if name in snapshot_columns:
+                    metadata[name] = value
             conn.execute(
-                "UPDATE snapshot_runs SET server_started_at = ?, "
-                "total_listings = ?, pages_fetched = ? WHERE snapshot_id = ?",
-                (server_started_at, len(listings), pages_fetched, snapshot_id),
+                "UPDATE snapshot_runs SET "
+                + ", ".join(f"{name} = ?" for name in metadata)
+                + " WHERE snapshot_id = ?",
+                (*metadata.values(), snapshot_id),
             )
             if self.post_snapshot_hook is not None:
                 self.post_snapshot_hook(conn, snapshot_id)
             lease.heartbeat()
+            final_metadata = {"status": "completed", "completed_at": commit_ts}
+            if "available_at" in snapshot_columns:
+                final_metadata["available_at"] = available_at
+            if "raw_retained" in snapshot_columns:
+                final_metadata["raw_retained"] = 1
             updated = conn.execute(
-                "UPDATE snapshot_runs SET status = 'completed', completed_at = ? "
-                "WHERE snapshot_id = ? AND status = 'running'",
-                (int(self._clock()), snapshot_id),
+                "UPDATE snapshot_runs SET "
+                + ", ".join(f"{name} = ?" for name in final_metadata)
+                + " WHERE snapshot_id = ? AND status = 'running'",
+                (*final_metadata.values(), snapshot_id),
             ).rowcount
             if updated != 1:
                 raise ApiError("Snapshot no longer has running status")
 
     def _mark_failed(self, snapshot_id: int) -> None:
         with open_connection(self.db_path) as conn, write_transaction(conn):
+            snapshot_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(snapshot_runs)")
+            }
+            retention_clause = (
+                ", raw_retained = 0" if "raw_retained" in snapshot_columns else ""
+            )
             conn.execute("DELETE FROM raw_listings WHERE snapshot_id = ?", (snapshot_id,))
             conn.execute(
                 "UPDATE snapshot_runs SET status = 'failed', completed_at = ?, "
                 "total_listings = 0, pages_fetched = 0, "
-                "error_message = 'Official API snapshot collection failed' "
-                "WHERE snapshot_id = ?", (int(self._clock()), snapshot_id),
+                "error_message = 'Official API snapshot collection failed'"
+                f"{retention_clause} WHERE snapshot_id = ?",
+                (int(self._clock()), snapshot_id),
             )
 
     def collect_once(self) -> SnapshotResult:
@@ -313,9 +376,14 @@ class OfficialApiCollector:
         with self.limiter.collector_lock() as lease:
             snapshot_id = self._start_snapshot()
             try:
-                listings, server_started_at, pages_fetched = self._fetch(lease)
+                listings, server_started_at, last_page_server_at, pages_fetched = self._fetch(
+                    lease
+                )
                 lease.heartbeat()
-                self._persist(snapshot_id, listings, server_started_at, pages_fetched, lease)
+                self._persist(
+                    snapshot_id, listings, server_started_at,
+                    last_page_server_at, pages_fetched, lease,
+                )
             except BaseException as error:
                 self._mark_failed(snapshot_id)
                 if isinstance(error, (ApiError, CollectorBusyError, KeyboardInterrupt, SystemExit)):

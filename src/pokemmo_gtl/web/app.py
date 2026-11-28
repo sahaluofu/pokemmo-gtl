@@ -14,7 +14,7 @@ import statistics
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal
 from http import HTTPStatus
 from pathlib import Path
@@ -47,6 +47,20 @@ _JOB_MUTEX = asyncio.Lock()
 _JOB_GUARD = threading.Lock()
 _ACTIVE_JOB: str | None = None
 _QUOTE_LOCK = threading.Lock()
+_CATALOG_COLUMNS = (
+    "item_id", "name_en", "name_zh", "category", "asset_class",
+    "max_stack_size", "description", "is_watched", "updated_at",
+)
+_BAR_PROJECTION = ", ".join(s.Bar.model_fields)
+_EVENT_PROJECTION = ", ".join(s.MarketEvent.model_fields)
+_PREDICTION_PROJECTION = (
+    "prediction_id, generated_at, item_id, horizon_hours, model_name, "
+    "current_price, ref_qty, prob_up, pred_q10, pred_q50, pred_q90, "
+    "expected_net_roi, signal, regime_note, top_drivers_json"
+)
+_MANUAL_QUOTE_PROJECTION = (
+    "quote_id, item_id, recorded_at, price, listed_qty, note, source_tag"
+)
 ItemId = Annotated[int, Field(gt=0, le=2**63 - 1)]
 EventId = Annotated[int, Field(gt=0, le=2**63 - 1)]
 
@@ -251,7 +265,10 @@ async def _run_job(name: str, function: Callable, *args, **kwargs):
 
 
 def _require_item(conn: sqlite3.Connection, item_id: int) -> sqlite3.Row:
-    row = conn.execute("SELECT * FROM items_catalog WHERE item_id = ?", (item_id,)).fetchone()
+    row = conn.execute(
+        f"SELECT {', '.join(_CATALOG_COLUMNS)} FROM items_catalog WHERE item_id = ?",
+        (item_id,),
+    ).fetchone()
     if row is None:
         raise APIError(404, "ITEM_NOT_FOUND", "Item not found")
     return row
@@ -272,8 +289,17 @@ def _item_rows(
     params = ([horizon] if horizon is not None else [])
     if item_id is not None:
         params.append(item_id)
+    catalog_projection = ", ".join(f"c.{column}" for column in _CATALOG_COLUMNS)
+    has_aliases = any(
+        row["name"] == "aliases_json"
+        for row in conn.execute("PRAGMA table_info(items_catalog)")
+    )
+    alias_projection = ", c.aliases_json" if has_aliases else ""
     rows = conn.execute(
-        """SELECT c.*, b.close_price AS current_price, b.close_ts AS bar_close_ts,
+        f"""SELECT {catalog_projection}{alias_projection},
+           CASE WHEN COALESCE(b.book_state, 'stocked') = 'stocked'
+                THEN b.close_price ELSE NULL END AS current_price,
+           b.book_state, b.close_ts AS bar_close_ts,
            b.total_listed_qty, b.depth_within_5pct,
            old.close_price AS previous_price, old.depth_within_5pct AS previous_depth,
            p.signal, p.prob_up, p.expected_net_roi
@@ -313,7 +339,7 @@ def _summary(values: dict) -> s.ItemSummary:
 
 
 def _events(conn: sqlite3.Connection, start=None, end=None) -> list[s.MarketEvent]:
-    query = "SELECT * FROM market_events"
+    query = f"SELECT {_EVENT_PROJECTION} FROM market_events"
     params = ()
     if start is not None and end is not None:
         query += " WHERE end_ts >= ? AND start_ts <= ?"
@@ -321,6 +347,81 @@ def _events(conn: sqlite3.Connection, start=None, end=None) -> list[s.MarketEven
     return [s.MarketEvent.model_validate(dict(row)) for row in conn.execute(
         query + " ORDER BY start_ts, event_id", params,
     )]
+
+
+def _overview_rp_index(
+    conn: sqlite3.Connection, config: AppConfig, *, reference_ts: int,
+) -> s.RPIndex | None:
+    """Median fresh stocked voucher quote in yen/RP, with empty-book barriers.
+
+    The latest observation is selected before its state and age are checked.
+    A mixed or empty observation therefore cannot fall back to a previously
+    stocked quote. The 24h baseline uses the same rule at reference_ts - 86400.
+    """
+    relations = (
+        config.item_relations.get("rp_vouchers", [])
+        if isinstance(config.item_relations, Mapping) else []
+    )
+    if isinstance(relations, Mapping):
+        relations = [relations]
+    max_age = int(getattr(
+        config.settings, "max_rp_quote_age_sec",
+        getattr(config, "max_rp_quote_age_sec", 86400),
+    ))
+    current_values = []
+    previous_values = []
+    current_timestamps = []
+    observed_timestamps = []
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            continue
+        try:
+            voucher_id = int(relation["item_id"])
+            denomination = float(relation["denomination"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if voucher_id <= 0 or not math.isfinite(denomination) or denomination <= 0:
+            continue
+        for timestamp, values, is_current in (
+            (reference_ts, current_values, True),
+            (reference_ts - 86400, previous_values, False),
+        ):
+            row = conn.execute(
+                "SELECT close_price, close_ts, "
+                "COALESCE(book_state, 'stocked') AS book_state "
+                "FROM item_bars WHERE item_id = ? AND timeframe = '4h' AND close_ts <= ? "
+                "ORDER BY close_ts DESC LIMIT 1",
+                (voucher_id, timestamp),
+            ).fetchone()
+            if row is None:
+                continue
+            if is_current:
+                observed_timestamps.append(row["close_ts"])
+            age = timestamp - row["close_ts"]
+            if row["book_state"] != "stocked" or not 0 <= age <= max_age:
+                continue
+            price = row["close_price"]
+            if price is None or not math.isfinite(price) or price <= 0:
+                continue
+            yen_per_rp = price / denomination
+            if not math.isfinite(yen_per_rp) or yen_per_rp <= 0:
+                continue
+            values.append(yen_per_rp)
+            if is_current:
+                current_timestamps.append(row["close_ts"])
+    if not observed_timestamps:
+        return None
+    value = statistics.median(current_values) if current_values else None
+    baseline = statistics.median(previous_values) if previous_values else None
+    change = _percent_change(value, baseline)
+    level = None if change is None else (
+        "low" if change < -5 else "high" if change >= 10 else
+        "elevated" if change >= 3 else "normal"
+    )
+    return s.RPIndex(
+        value=value, change_24h_pct=change, inflation_level=level,
+        updated_at=max(current_timestamps or observed_timestamps),
+    )
 
 
 def _rate_budget(config: AppConfig) -> int | None:
@@ -510,20 +611,11 @@ def create_app(
                 "SELECT MAX(completed_at) FROM snapshot_runs WHERE status = 'completed')",
             ).fetchone()[0]
             events = _events(conn)
+            reference_ts = anchor if anchor is not None else int(time.time())
+            if config.env == Environment.live:
+                reference_ts = max(reference_ts, int(time.time()))
+            rp_index = _overview_rp_index(conn, config, reference_ts=reference_ts)
         items = [_summary(row) for row in rows]
-        rp = next((row for row in rows if row["item_id"] == 1192), None)
-        rp_index = None
-        if rp and rp["bar_close_ts"] is not None:
-            change = rp["change_24h_pct"]
-            # The 24h observation is the baseline; no invented level without it.
-            level = None if change is None else (
-                "low" if change < -5 else "high" if change >= 10 else
-                "elevated" if change >= 3 else "normal"
-            )
-            rp_index = s.RPIndex(
-                value=rp["current_price"] / 1000 if rp["current_price"] is not None else None,
-                change_24h_pct=change, inflation_level=level, updated_at=rp["bar_close_ts"],
-            )
         bullish = sorted(
             (item for item in items if item.expected_net_roi is not None),
             key=lambda item: (item.expected_net_roi,
@@ -588,8 +680,9 @@ def create_app(
             ).fetchone()[0]
             cutoff = max(0, latest - query.days * 86400) if latest and query.days else 0
             rows = conn.execute(
-                "SELECT * FROM item_bars WHERE item_id = ? AND timeframe = ? AND close_ts >= ? "
-                "ORDER BY bucket_ts", (item_id, query.timeframe, cutoff),
+                f"SELECT {_BAR_PROJECTION} FROM item_bars "
+                "WHERE item_id = ? AND timeframe = ? AND close_ts >= ? ORDER BY bucket_ts",
+                (item_id, query.timeframe, cutoff),
             ).fetchall()
             events = _events(conn, rows[0]["bucket_ts"], rows[-1]["close_ts"]) if rows else (
                 _events(conn)
@@ -605,8 +698,10 @@ def create_app(
             item = _summary(_item_rows(conn, item_id=item_id)[0])
             for horizon in query.horizon_hours:
                 row = conn.execute(
-                    "SELECT * FROM predictions WHERE item_id = ? AND horizon_hours = ? "
-                    "ORDER BY generated_at DESC, prediction_id DESC LIMIT 1", (item_id, horizon),
+                    f"SELECT {_PREDICTION_PROJECTION} FROM predictions "
+                    "WHERE item_id = ? AND horizon_hours = ? "
+                    "ORDER BY generated_at DESC, prediction_id DESC LIMIT 1",
+                    (item_id, horizon),
                 ).fetchone()
                 if row is not None:
                     values = dict(row)
@@ -675,7 +770,8 @@ def create_app(
                 raise APIError(400, "INVALID_QUOTE", "Quote cannot be imported") from exc
             with open_connection(config.db_path) as conn:
                 row = conn.execute(
-                    "SELECT * FROM manual_quotes WHERE item_id = ? AND recorded_at = ? "
+                    f"SELECT {_MANUAL_QUOTE_PROJECTION} FROM manual_quotes "
+                    "WHERE item_id = ? AND recorded_at = ? "
                     "AND price = ? AND listed_qty IS ? AND note IS ? "
                     "ORDER BY quote_id DESC LIMIT 1",
                     (request.item_id, timestamp, request.price, request.listed_qty, request.note),
@@ -732,7 +828,8 @@ def create_app(
         with open_connection(config.db_path) as conn:
             item = dict(_require_item(conn, item_id))
             bars = conn.execute(
-                "SELECT * FROM item_bars WHERE item_id = ? AND timeframe = ? ORDER BY bucket_ts",
+                f"SELECT {_BAR_PROJECTION} FROM item_bars "
+                "WHERE item_id = ? AND timeframe = ? ORDER BY bucket_ts",
                 (item_id, query.timeframe),
             ).fetchall()
         columns = ["name_en", "name_zh", "category", "asset_class", "max_stack_size", "description"]

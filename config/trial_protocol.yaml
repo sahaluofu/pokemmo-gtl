@@ -1,0 +1,52 @@
+# Frozen prospectively for Stage 2 entry trials and Stage 3 exit comparisons.
+# Changes require a new protocol version and newly registered trial blocks.
+protocol_version: "v2.0-stage2-frozen"
+
+# Quotes are actionable on the inclusive interval:
+# available_at <= decision_ts <= min(explicit_expiry, available_at + TTL).
+quote_ttl_sec: 1200
+
+# Playbook B needs seven full days of history. Below this coverage, or when
+# its other shock conditions are unknown, use Simple Limit ordering.
+min_history_coverage_hours: 168.0
+shock_zscore_threshold: -2.0
+
+# Stage 2 primary endpoint:
+# Distinct opportunity_group_id values per preassigned window, confirmed by
+# the client as sufficient in quantity and within the total purchase ceiling.
+# Audit samples, negative controls, and the unassigned arm are diagnostics.
+# ZERO_OPPORTUNITY and MISSED_BY_USER windows remain in completed pairs as Y=0.
+# ABORTED windows also remain in completed pairs; verified opportunities
+# observed before the abort remain eligible for the primary endpoint.
+min_paired_blocks: 6
+min_mean_opportunity_gain_per_window: 0.5
+
+# Resample whole paired differences with replacement. The lower bound is the
+# lower endpoint of an equal-tailed percentile interval: the 5th percentile
+# for the frozen 90% confidence level. Use linear percentile interpolation.
+bootstrap_confidence_level: 0.90
+bootstrap_iterations: 2000
+bootstrap_seed: 20261126
+
+# Rate population: assigned-arm opportunity exposures in completed paired blocks.
+# Both rates use expired_or_missed_denominator from the report: distinct
+# opportunity groups plus the missed-window exposures defined below.
+# Repeated price ticks count once. A confirmed group is a successful exposure.
+# Client confirmation rate is confirmed_opportunities / that denominator
+# (0.0 when the denominator is zero) and must meet the frozen minimum.
+# For the expired/missed rate, explicit expiry, a late check, or a missed check
+# on an unconfirmed group is a failure. Timely failed quantity/price checks
+# remain in both denominators but are neither confirmed nor expired/missed.
+# A MISSED_BY_USER window makes all its actionable groups missed; if it has
+# none, retain one missed-window exposure. An empty ABORTED window likewise
+# contributes one missed exposure. ZERO_OPPORTUNITY contributes no exposure
+# to these rates, but still contributes Y=0 to the paired primary endpoint.
+min_client_confirmation_rate: 0.50
+max_expired_or_missed_rate: 0.35
+
+# Stage 3 uses comparable inventory to compare fixed listing against review
+# and repricing at preregistered times. Match existing listing age, avoid
+# simultaneous competing own listings, and use a common settlement cutoff.
+# Report first-sale time from public_visible_at, quantity sold by cutoff,
+# sell-through, review minutes, and future net recovery including tail stock.
+# Stage 2 entry evidence alone does not authorize an exit rule or trial size.

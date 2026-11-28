@@ -47,7 +47,10 @@ def log_returns_to_prices(
     if not math.isfinite(current_price) or current_price <= 0:
         raise ValueError("current_price must be a finite positive number")
     prices = [
-        max(1, int(round(current_price * math.exp(min(700.0, max(-700.0, value))))))
+        min(
+            2**62,
+            max(1, int(round(current_price * math.exp(min(700.0, max(-700.0, value)))))),
+        )
         for value in (q10_ret, q50_ret, q90_ret)
     ]
     return tuple(sorted(prices))  # type: ignore[return-value]
@@ -55,7 +58,7 @@ def log_returns_to_prices(
 
 def tukey_expected_price(q10: float, q50: float, q90: float) -> int:
     """Calculate the specified 25/50/25 weighted expected sale price."""
-    return max(1, int(round(0.25 * q10 + 0.50 * q50 + 0.25 * q90)))
+    return min(2**62, max(1, int(round(0.25 * q10 + 0.50 * q50 + 0.25 * q90))))
 
 
 def signal_for(expected_net_roi: float, prob_up: float) -> str:

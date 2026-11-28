@@ -235,6 +235,7 @@ class ItemSummary(APIResponse):
     is_watched: bool = False
     updated_at: EpochSeconds | None = None
     current_price: PositivePrice | None = None
+    book_state: Literal["stocked", "mixed_ended_empty", "empty_confirmed"] | None = None
     change_24h_pct: FiniteFloat | None = None
     signal: Signal | None = None
     prob_up: Probability | None = None
@@ -272,6 +273,9 @@ class Bar(APIResponse):
     bucket_ts: EpochSeconds
     close_ts: EpochSeconds
     data_source: Literal["snapshot", "manual"]
+    book_state: Literal["stocked", "mixed_ended_empty", "empty_confirmed"] = "stocked"
+    bar_available_at: EpochSeconds | None = None
+    latest_publish_seq: PositiveInt | None = None
     open_price: PositivePrice | None
     high_price: PositivePrice | None
     low_price: PositivePrice | None
@@ -295,6 +299,26 @@ class Bar(APIResponse):
         if self.bucket_ts % duration or self.close_ts != self.bucket_ts + duration:
             raise ValueError("bar timestamps must match the UTC timeframe grid")
         prices = (self.open_price, self.high_price, self.low_price, self.close_price)
+        if self.book_state == "empty_confirmed":
+            all_prices = (
+                *prices, self.robust_best_ask, self.best_ask_min, self.p10_price,
+            )
+            if any(price is not None for price in all_prices):
+                raise ValueError("empty_confirmed bars must have null prices")
+        elif self.book_state == "mixed_ended_empty":
+            if any(price is None for price in prices):
+                raise ValueError("mixed_ended_empty bars must retain historical OHLC prices")
+        if self.book_state != "stocked":
+            if any(value is not None for value in (
+                self.robust_best_ask, self.p10_price, self.spread_top5_pct,
+            )):
+                raise ValueError("empty books must have null current quote measurements")
+            if self.total_listed_qty != 0:
+                raise ValueError("empty books must have zero total_listed_qty")
+            if any(value not in (None, 0) for value in (
+                self.listing_count, self.depth_within_5pct,
+            )):
+                raise ValueError("empty books cannot retain listed inventory or depth")
         if all(price is not None for price in prices):
             if not self.low_price <= min(self.open_price, self.close_price):
                 raise ValueError("low_price must not exceed open_price or close_price")

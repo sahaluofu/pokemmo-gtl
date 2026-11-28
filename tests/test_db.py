@@ -18,13 +18,19 @@ from pokemmo_gtl.db.repository import MIGRATIONS_DIR, migrate
 TABLES = {
     "schema_migrations", "items_catalog", "snapshot_runs", "raw_listings",
     "inferred_flows", "item_bars", "manual_quotes", "market_events",
-    "predictions", "backtest_runs",
+    "predictions", "backtest_runs", "publish_events", "item_bar_revisions",
+    "inferred_flow_revisions", "orderbook_observations", "review_windows",
+    "opportunity_observations", "user_positions", "user_orders", "user_ledger_events",
 }
 INDEXES = {
     "idx_snapshot_runs_status_ts", "idx_raw_listings_snap_item_price",
     "idx_inferred_flows_item_ts", "idx_inferred_flows_prev_snap", "idx_item_bars_tf_ts",
     "idx_manual_quotes_item_ts", "idx_market_events_window", "idx_predictions_lookup",
-    "idx_predictions_rank",
+    "idx_predictions_rank", "idx_item_bars_avail", "idx_publish_events_avail",
+    "idx_bar_rev_lookup", "idx_bar_rev_item_lookup", "idx_flow_rev_item_ts",
+    "idx_review_windows_block", "idx_opp_obs_window_arm",
+    "idx_user_positions_arm_status", "idx_user_orders_arm_status",
+    "idx_ledger_events_arm_order",
 }
 
 
@@ -74,7 +80,7 @@ def test_every_connection_has_required_pragmas_and_closes(db_path):
             conn.execute("SELECT 1")
 
 
-def test_exact_schema_is_strict_and_has_nine_secondary_indexes(db_path):
+def test_exact_schema_is_strict_and_has_expected_secondary_indexes(db_path):
     with open_connection(db_path) as conn:
         tables = {row[1]: row[5] for row in conn.execute("PRAGMA table_list")}
         assert {name for name in tables if not name.startswith("sqlite_")} == TABLES
@@ -135,7 +141,7 @@ def test_repeated_migrations_are_idempotent_and_preserve_data(db_path):
         assert [tuple(row) for row in conn.execute("SELECT * FROM schema_migrations")] == before
         assert [tuple(row) for row in conn.execute("SELECT * FROM sqlite_schema")] == schema
         assert conn.execute("SELECT name_en FROM items_catalog").fetchone()[0] == "精灵球"
-    assert len(before) == 1 and before[0][0] == "001_init"
+    assert [row[0] for row in before] == ["001_init", "002_v2_ledger_and_observations"]
 
 
 def test_failed_migration_is_atomic(tmp_path):

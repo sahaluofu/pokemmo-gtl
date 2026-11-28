@@ -471,12 +471,12 @@
   }
 
   function chartTooltip(params) {
-    const points = Array.isArray(params) ? params : [params];
-    const ts = points.find((point) => Array.isArray(point.value))?.value?.[0];
+    const points = (Array.isArray(params) ? params : [params])
+      .filter((point) => point && Array.isArray(point.value));
+    const ts = points[0]?.value?.[0];
     let text = escapeHTML(formatDate(Number(ts) / 1000));
     for (const point of points) {
       const values = point.value;
-      if (!Array.isArray(values)) continue;
       if (point.seriesName === "K 线") {
         text += "<br>开 " + formatMoney(values[1]) + " / 收 " + formatMoney(values[2])
           + "<br>低 " + formatMoney(values[3]) + " / 高 " + formatMoney(values[4]);
@@ -494,15 +494,25 @@
     if (!rows.length) return renderEmptyChart("priceChart", "所选物品暂无 K 线数据");
     const latest = rows.at(-1);
     const anchorTs = Number(latest.close_ts ?? latest.bucket_ts);
-    const anchorPrice = numeric(latest.close_price ?? latest.robust_best_ask);
+    const anchorPrice = latest.book_state && latest.book_state !== "stocked"
+      ? null : numeric(latest.close_price ?? latest.robust_best_ask);
     const forecasts = state.forecasts.filter((entry) => [24, 72, 168].includes(entry.horizon_hours));
     const anchorMs = anchorTs * 1000;
     const future = forecasts.map((entry) => ({
       ...entry, ts: anchorMs + entry.horizon_hours * 3600000,
     }));
     const endTs = Math.max(anchorMs, ...future.map((entry) => entry.ts));
-    const history = rows.map((bar) => [Number(bar.bucket_ts) * 1000,
-      numeric(bar.open_price), numeric(bar.close_price), numeric(bar.low_price), numeric(bar.high_price)]);
+    const history = rows.map((bar) => {
+      const prices = [
+        numeric(bar.open_price), numeric(bar.close_price),
+        numeric(bar.low_price), numeric(bar.high_price),
+      ];
+      const hasPrices = bar.book_state !== "empty_confirmed"
+        && prices.every((price) => price !== null);
+      // ECharts recognizes "-" as a missing candle dimension. Retain the
+      // timestamp so empty books leave a gap rather than becoming zero prices.
+      return [Number(bar.bucket_ts) * 1000, ...(hasPrices ? prices : ["-", "-", "-", "-"])];
+    });
     const firstTs = Number(rows[0].bucket_ts) * 1000;
     const markers = state.barEvents.filter((event) => event.announced_at <= anchorTs
       && event.start_ts * 1000 >= firstTs && event.start_ts * 1000 <= endTs).map((event) => ({
@@ -516,7 +526,7 @@
       barMaxWidth: 16,
     };
     const line = {
-      name: "市场价格", type: "line", data: history.map((row) => [row[0], row[2]]),
+      name: "市场价格", type: "line", data: history.map((row) => [row[0], numeric(row[2])]),
       showSymbol: false, connectNulls: false, lineStyle: { color: "#247f87", width: 2 },
     };
     const priceSeries = state.chartType === "candlestick" ? candle : line;
@@ -583,12 +593,12 @@
       { type: "value", name: "隐含成交", nameTextStyle: { color: themeText() },
         axisLabel: { color: themeText(), fontSize: 9 }, splitLine: { show: false } }],
       series: [
-        { name: "总挂量", type: "line", showSymbol: false,
+        { name: "总挂量", type: "line", showSymbol: false, connectNulls: false,
           data: rows.map((bar) => [bar.bucket_ts * 1000, numeric(bar.total_listed_qty)]),
           lineStyle: { color: "#94aba1", width: 1 }, areaStyle: { color: "rgba(148,171,161,.12)" } },
         { name: "近盘深度", type: "bar", data: rows.map((bar) => [bar.bucket_ts * 1000, numeric(bar.depth_within_5pct)]),
           itemStyle: { color: "#247f87", opacity: .75 }, barMaxWidth: 12 },
-        { name: "估算成交", type: "line", yAxisIndex: 1, showSymbol: false,
+        { name: "估算成交", type: "line", yAxisIndex: 1, showSymbol: false, connectNulls: false,
           data: rows.map((bar) => [bar.bucket_ts * 1000, numeric(bar.est_sold_qty_sum)]),
           lineStyle: { color: "#b88632", width: 2 } },
       ],
@@ -817,8 +827,7 @@
     $("#eventList").innerHTML = [...state.events].sort((a, b) => a.start_ts - b.start_ts).map((event) =>
       '<div class="event-row"><div><strong>' + escapeHTML(event.name) + ' <span class="signal">'
       + escapeHTML(event.event_type) + "</span></strong><span>公告 " + formatDate(event.announced_at)
-      + " · " + formatDate(event.start_ts) + " 至 " + formatDate(event.end_ts) + " · "
-      + escapeHTML(event.impact_scope) + "</span>"
+      + " · " + formatDate(event.start_ts) + " 至 " + formatDate(event.end_ts) + "</span>"
       + (event.notes ? "<span>" + escapeHTML(event.notes) + "</span>" : "")
       + '</div><button type="button" data-delete-event="' + event.event_id + '" aria-label="删除 '
       + escapeHTML(event.name) + '">删除</button></div>'

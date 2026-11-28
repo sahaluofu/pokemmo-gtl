@@ -1,7 +1,9 @@
 """Command-line interface for local PokeMMO GTL market research."""
 
+import json
 import time
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
@@ -18,6 +20,7 @@ from pokemmo_gtl.ingestion.simulator import simulate
 from pokemmo_gtl.pipeline.aggregator import process_snapshot
 from pokemmo_gtl.pipeline.retention import run_retention
 from pokemmo_gtl.quant.backtester import run_backtest
+from pokemmo_gtl.quant.ledger import LedgerState, LedgerValidationError, replay_ledger
 from pokemmo_gtl.quant.predictor import run_forecast
 
 app = typer.Typer(no_args_is_help=True)
@@ -76,21 +79,26 @@ def simulate_command(
     seed: Annotated[int, typer.Option("--seed")] = 42,
     env: Annotated[Environment, typer.Option("--env")] = Environment.live,
     end_ts: Annotated[int | None, typer.Option("--end-ts", min=1)] = None,
+    reset: Annotated[bool, typer.Option("--reset/--no-reset")] = False,
 ) -> None:
-    """Generate a deterministic local market snapshot stream (sim environment only)."""
+    """Generate local snapshots; overlapping simulation windows require --reset."""
     if env is Environment.live:
         raise typer.BadParameter("simulate requires --env sim")
     config = load_config(env)
-    result = simulate(
-        config.db_path,
-        env=env,
-        days=days,
-        seed=seed,
-        end_ts=end_ts,
-        on_snapshot=lambda conn, snapshot_id, _prev, _ts: process_snapshot(
-            conn, snapshot_id, config.settings
-        ),
-    )
+    try:
+        result = simulate(
+            config.db_path,
+            env=env,
+            days=days,
+            seed=seed,
+            end_ts=end_ts,
+            reset=reset,
+            on_snapshot=lambda conn, snapshot_id, _prev, _ts: process_snapshot(
+                conn, snapshot_id, config.settings
+            ),
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
     with open_connection(config.db_path) as conn:
         deleted = run_retention(conn, config.settings, now_ts=result.end_ts)
     typer.echo(
@@ -226,6 +234,50 @@ def backtest_command(
 
 def _format_metric(value: object, digits: int) -> str:
     return "n/a" if value is None else f"{float(value):.{digits}f}"
+
+
+def _ledger_summary(state: LedgerState) -> dict[str, object]:
+    return {
+        "arm_id": state.arm_id,
+        "available_cash": state.available_cash,
+        "unclaimed_proceeds": state.unclaimed_proceeds,
+        "occupied_slots": state.occupied_slots,
+        "open_positions": [
+            asdict(position)
+            for position in sorted(
+                state.positions.values(), key=lambda position: position.position_id,
+            )
+            if position.status == "OPEN"
+        ],
+    }
+
+
+@app.command("ledger-replay")
+def ledger_replay_command(
+    env: Annotated[Environment, typer.Option("--env")] = Environment.live,
+    arm: Annotated[str | None, typer.Option("--arm")] = None,
+    as_of: Annotated[int | None, typer.Option("--as-of", min=0)] = None,
+) -> None:
+    """Replay ledger events and print JSON balances and open positions."""
+    config = load_config(env)
+    migrate(config.db_path)
+    try:
+        with open_connection(config.db_path) as conn:
+            state = replay_ledger(conn, as_of_ts=as_of, arm_id=arm)
+    except LedgerValidationError as error:
+        typer.echo(f"Ledger replay failed: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    payload = {
+        "env": env.value,
+        "as_of_ts": as_of,
+        **_ledger_summary(state),
+    }
+    if arm is None:
+        payload["arms"] = {
+            arm_id: _ledger_summary(arm_state)
+            for arm_id, arm_state in sorted(state.arms.items())
+        }
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False))
 
 
 @app.command("serve")

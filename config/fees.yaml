@@ -3,3 +3,20 @@ item_min_fee: 100
 pokemon_min_fee: 1000
 max_fee_per_slot: 25000
 default_relist_rate: "0.15"
+
+# These legacy assumptions remain UNVERIFIED.
+# After Stage 1 client verification, replace any incorrect assumptions and set
+# verified: true ONLY after listing, direct-edit, partial-sale edit, relist,
+# rounding, cap, and Pending refund previews match actual receipts exactly.
+verified: false
+fee_basis: per_slot
+rounding_mode: floor
+
+# An empty schedule preserves the top-level legacy calculation.
+# After Stage 1, append verified rules with a unique version_id and the actual
+# effective_from timestamp in UTC seconds. Set each verified rule's own
+# verified: true; do not infer verification from the top-level flag.
+# Preserve historical versions when fees change.
+# Each scheduled rule uses max_fee, which caps each slot for per_slot rules
+# and each unit for per_unit rules.
+rules_schedule: []

@@ -29,17 +29,31 @@ def add_manual_quote(
     recorded_at: int | None = None,
     listed_qty: int | None = None,
     note: str | None = None,
+    ingested_at: int | None = None,
 ) -> ImportResult:
     """Store one manual observation and refresh its 4h/1d bars atomically."""
     timestamp = int(time.time()) if recorded_at is None else recorded_at
+    ingested_ts = _validated_ingested_at(
+        int(time.time()) if ingested_at is None else ingested_at
+    )
     quote = _validated_quote(item_id, price, timestamp, listed_qty, note)
     with open_connection(db_path) as conn, write_transaction(conn):
-        _insert_quote(conn, quote)
+        quote_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(manual_quotes)")
+        }
+        quote_id = _insert_quote(
+            conn, quote, ingested_at=ingested_ts, quote_columns=quote_columns
+        )
+        publish_seq = _publish_quotes(
+            conn, [quote_id], ingested_at=ingested_ts, quote_columns=quote_columns
+        )
         touched = {
             (item_id, timestamp - timestamp % seconds, timeframe)
             for timeframe, seconds in TIMEFRAMES.items()
         }
-        skipped = _materialize_bars(conn, touched)
+        skipped = _materialize_bars(
+            conn, touched, ingested_at=ingested_ts, publish_seq=publish_seq
+        )
     return ImportResult(1, skipped, [])
 
 
@@ -60,8 +74,12 @@ def import_csv(
     imported = 0
     errors = []
     touched = set()
-    default_ts = int(time.time()) if now_ts is None else now_ts
+    quote_ids: list[int] = []
+    default_ts = _validated_ingested_at(int(time.time()) if now_ts is None else now_ts)
     with open_connection(db_path) as conn, write_transaction(conn):
+        quote_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(manual_quotes)")
+        }
         try:
             with path.open("rb") as binary:
                 reader = csv.DictReader(_utf8_lines(binary, max_bytes, max_rows + 1), strict=True)
@@ -92,16 +110,24 @@ def import_csv(
                         quote = _validated_quote(
                             item_id, price, recorded_at, listed_qty, row.get("note") or None
                         )
-                        _insert_quote(conn, quote)
+                        quote_id = _insert_quote(
+                            conn, quote, ingested_at=default_ts, quote_columns=quote_columns
+                        )
                     except ValueError as error:
                         errors.append(f"row {row_number}: {error}")
                         continue
                     imported += 1
+                    quote_ids.append(quote_id)
                     for timeframe, seconds in TIMEFRAMES.items():
                         touched.add((item_id, recorded_at - recorded_at % seconds, timeframe))
         except (UnicodeDecodeError, csv.Error) as error:
             raise ValueError("invalid UTF-8 CSV structure or encoding") from error
-        skipped = _materialize_bars(conn, touched)
+        publish_seq = _publish_quotes(
+            conn, quote_ids, ingested_at=default_ts, quote_columns=quote_columns
+        )
+        skipped = _materialize_bars(
+            conn, touched, ingested_at=default_ts, publish_seq=publish_seq
+        )
     return ImportResult(imported, skipped, errors)
 
 
@@ -120,44 +146,101 @@ def _validated_quote(item_id, price, recorded_at, listed_qty, note) -> tuple:
     return item_id, recorded_at, price, listed_qty, note
 
 
-def _insert_quote(conn, quote: tuple) -> None:
+def _validated_ingested_at(value: int) -> int:
+    if type(value) is not int or not 0 < value <= MAX_SQLITE_INTEGER:
+        raise ValueError("ingested_at must be a positive SQLite integer")
+    return value
+
+
+def _insert_quote(
+    conn,
+    quote: tuple,
+    *,
+    ingested_at: int,
+    quote_columns: set[str],
+) -> int:
     exists = conn.execute("SELECT 1 FROM items_catalog WHERE item_id = ?", (quote[0],)).fetchone()
     if exists is None:
         raise ValueError("item_id is not present in items_catalog")
-    conn.execute(
-        """INSERT INTO manual_quotes
-           (item_id, recorded_at, price, listed_qty, note, source_tag)
-           VALUES (?, ?, ?, ?, ?, 'manual')""",
-        quote,
+    if "ingested_at" in quote_columns:
+        cursor = conn.execute(
+            """INSERT INTO manual_quotes
+               (item_id, recorded_at, price, listed_qty, note, source_tag, ingested_at)
+               VALUES (?, ?, ?, ?, ?, 'manual', ?)""",
+            (*quote, ingested_at),
+        )
+    else:
+        cursor = conn.execute(
+            """INSERT INTO manual_quotes
+               (item_id, recorded_at, price, listed_qty, note, source_tag)
+               VALUES (?, ?, ?, ?, ?, 'manual')""",
+            quote,
+        )
+    return cursor.lastrowid
+
+
+def _publish_quotes(
+    conn,
+    quote_ids: list[int],
+    *,
+    ingested_at: int,
+    quote_columns: set[str],
+) -> int | None:
+    """Allocate one publication for all successfully inserted rows in this import."""
+    if not quote_ids:
+        return None
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type = 'table'
+                 AND name IN ('publish_events', 'item_bar_revisions')"""
+        )
+    }
+    if tables != {"publish_events", "item_bar_revisions"}:
+        return None
+    cursor = conn.execute(
+        """INSERT INTO publish_events (available_at, source_type, source_id)
+           VALUES (?, 'manual_quote', ?)""",
+        (ingested_at, quote_ids[-1]),
     )
+    publish_seq = cursor.lastrowid
+    if "publish_seq" in quote_columns:
+        conn.executemany(
+            "UPDATE manual_quotes SET publish_seq = ? WHERE quote_id = ?",
+            ((publish_seq, quote_id) for quote_id in quote_ids),
+        )
+    return publish_seq
 
 
-def _materialize_bars(conn, touched: set[tuple[int, int, str]]) -> int:
-    skipped = 0
-    for item_id, bucket_ts, timeframe in sorted(touched):
-        seconds = TIMEFRAMES[timeframe]
-        protected = conn.execute(
-            """SELECT 1 FROM item_bars WHERE item_id = ? AND timeframe = ?
-               AND bucket_ts = ? AND data_source = 'snapshot'""",
-            (item_id, timeframe, bucket_ts),
-        ).fetchone()
-        skipped += protected is not None
-        quotes = conn.execute(
-            """SELECT price, listed_qty FROM manual_quotes
-               WHERE item_id = ? AND recorded_at >= ? AND recorded_at < ?
-               ORDER BY recorded_at, quote_id""",
-            (item_id, bucket_ts, bucket_ts + seconds),
-        ).fetchall()
-        first, last = quotes[0], quotes[-1]
-        low = min(quote["price"] for quote in quotes)
-        high = max(quote["price"] for quote in quotes)
-        conn.execute(
-            """INSERT INTO item_bars
+def _materialize_bars(
+    conn,
+    touched: set[tuple[int, int, str]],
+    *,
+    ingested_at: int,
+    publish_seq: int | None,
+) -> int:
+    if not touched:
+        return 0
+    bar_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(item_bars)")
+    }
+    metadata_columns = [
+        column
+        for column in ("book_state", "bar_available_at", "latest_publish_seq")
+        if column in bar_columns
+    ]
+    metadata_insert_sql = "".join(f", {column}" for column in metadata_columns)
+    metadata_values_sql = ", ?" * len(metadata_columns)
+    metadata_update_sql = "".join(
+        f", {column} = excluded.{column}" for column in metadata_columns
+    )
+    bar_upsert_sql = f"""INSERT INTO item_bars
                (item_id, timeframe, bucket_ts, close_ts, data_source,
                 open_price, high_price, low_price, close_price,
                 robust_best_ask, best_ask_min, p10_price, total_listed_qty,
-                sample_count, valid_flow_samples)
-               VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                sample_count, valid_flow_samples{metadata_insert_sql})
+               VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0{metadata_values_sql})
                ON CONFLICT(item_id, timeframe, bucket_ts) DO UPDATE SET
                  close_ts = excluded.close_ts,
                  data_source = 'manual',
@@ -172,14 +255,62 @@ def _materialize_bars(conn, touched: set[tuple[int, int, str]]) -> int:
                  listing_count = NULL, depth_within_5pct = NULL, spread_top5_pct = NULL,
                  est_sold_qty_sum = NULL, expired_qty_sum = NULL, new_listed_qty_sum = NULL,
                  sample_count = excluded.sample_count,
-                 valid_flow_samples = 0
-               WHERE item_bars.data_source != 'snapshot'""",
+                 valid_flow_samples = 0{metadata_update_sql}
+               WHERE item_bars.data_source != 'snapshot'"""
+    skipped = 0
+    for item_id, bucket_ts, timeframe in sorted(touched):
+        seconds = TIMEFRAMES[timeframe]
+        protected = conn.execute(
+            """SELECT 1 FROM item_bars WHERE item_id = ? AND timeframe = ?
+               AND bucket_ts = ? AND data_source = 'snapshot'""",
+            (item_id, timeframe, bucket_ts),
+        ).fetchone()
+        if protected is not None:
+            skipped += 1
+            continue
+        quotes = conn.execute(
+            """SELECT price, listed_qty, recorded_at FROM manual_quotes
+               WHERE item_id = ? AND recorded_at >= ? AND recorded_at < ?
+               ORDER BY recorded_at, quote_id""",
+            (item_id, bucket_ts, bucket_ts + seconds),
+        ).fetchall()
+        first, last = quotes[0], quotes[-1]
+        low = min(quote["price"] for quote in quotes)
+        high = max(quote["price"] for quote in quotes)
+        max_recorded_at = max(quote["recorded_at"] for quote in quotes)
+        revision_available_at = max(max_recorded_at, ingested_at)
+        metrics = (
+            first["price"], high, low, last["price"], last["price"], low,
+            last["price"], last["listed_qty"], len(quotes),
+        )
+        metadata = {
+            "book_state": "stocked",
+            "bar_available_at": revision_available_at,
+            "latest_publish_seq": publish_seq,
+        }
+        conn.execute(
+            bar_upsert_sql,
             (
                 item_id, timeframe, bucket_ts, bucket_ts + seconds,
-                first["price"], high, low, last["price"], last["price"], low,
-                last["price"], last["listed_qty"], len(quotes),
+                *metrics,
+                *(metadata[column] for column in metadata_columns),
             ),
         )
+        if publish_seq is not None:
+            conn.execute(
+                """INSERT INTO item_bar_revisions
+                   (item_id, timeframe, bucket_ts, publish_seq, close_ts,
+                    revision_available_at, data_source, book_state,
+                    open_price, high_price, low_price, close_price,
+                    robust_best_ask, best_ask_min, p10_price, total_listed_qty,
+                    sample_count, valid_flow_samples)
+                   VALUES (?, ?, ?, ?, ?, ?, 'manual', 'stocked',
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                (
+                    item_id, timeframe, bucket_ts, publish_seq, bucket_ts + seconds,
+                    revision_available_at, *metrics,
+                ),
+            )
     return skipped
 
 
